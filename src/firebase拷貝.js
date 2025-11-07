@@ -1,21 +1,33 @@
-// Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-import { getAnalytics } from "firebase/analytics";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
+// ===== src/firebase.js (utility for username + keys) =====
 
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
-const firebaseConfig = {
-  apiKey: "AIzaSyBo5PK2DE-1Dm1NITEfounaFsdMXxRJcxY",
-  authDomain: "cybernetic-pact-475902-c8.firebaseapp.com",
-  projectId: "cybernetic-pact-475902-c8",
-  storageBucket: "cybernetic-pact-475902-c8.firebasestorage.app",
-  messagingSenderId: "39386275749",
-  appId: "1:39386275749:web:374b080c1ee4a29aa9924c",
-  measurementId: "G-GE7LPDYVXR"
+// 規範化使用者名稱：去除多餘空白、全形轉半形、轉小寫。
+export function normalizeName(name) {
+  // NFKC 正規化可把全形英數轉為半形、合併相似字元
+  const n = (name || "")
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return n;
+}
+
+// localStorage Keys。以「名稱命名空間」避免不同使用者的資料互相覆蓋
+export const LSK = {
+  CURRENT_NAME: "mvp.currentName.v2",
+  ENTRIES: (user) => `mvp.entries.v1::${user}`,
+  SETTINGS: (user) => `mvp.settings.v1::${user}`,
 };
 
-// Initialize Firebase
+/* 若後續要接 Firebase，可在此補上設定與導出：
+import { initializeApp } from "firebase/app";
+import { getFirestore } from "firebase/firestore";
+
+const firebaseConfig = {
+  // apiKey: "...",
+  // authDomain: "...",
+  // projectId: "...",
+};
+
 const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
+export const db = getFirestore(app);
+*/

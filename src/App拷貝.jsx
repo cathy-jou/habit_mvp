@@ -1,11 +1,6 @@
-// ===== src/App.jsx (Habit Tracker MVP — Complete) =====
+// ===== src/App.jsx (Habit Tracker MVP — Username Gate FIXED) =====
 import React, { useEffect, useMemo, useState } from "react";
-
-// ----- Keys for localStorage -----
-const KEY = {
-  ENTRIES: "mvp.entries.v1",
-  SETTINGS: "mvp.settings.v1",
-};
+import { normalizeName, LSK } from "./firebase";
 
 // ----- Date & Period Helpers -----
 function todayISO() {
@@ -68,30 +63,52 @@ const Stat = ({ label, value, sub }) => (
 
 // ===== Main Component =====
 export default function App() {
-  // States
-  const [entries, setEntries] = useState(() => {
+  // ----- Confirmed user vs input value (FIX) -----
+  const [currentName, setCurrentName] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem(KEY.ENTRIES) || "[]");
+      return localStorage.getItem(LSK.CURRENT_NAME) || "";
     } catch {
-      return [];
+      return "";
     }
   });
-  const [settings, setSettings] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(KEY.SETTINGS) || "null") || { savingsRatio: 0 };
-    } catch {
-      return { savingsRatio: 0 };
-    }
-  });
+  const [rawName, setRawName] = useState("");
+  useEffect(() => {
+    // When currentName changes (including first mount), mirror it into the input
+    setRawName(currentName || "");
+  }, [currentName]);
+
+  // ----- App states (user-scoped) -----
+  const [entries, setEntries] = useState([]);
+  const [settings, setSettings] = useState({ savingsRatio: 0 });
   const [todayImprove, setTodayImprove] = useState("");
   const [todayGratitude, setTodayGratitude] = useState("");
   const [todayBookkeep, setTodayBookkeep] = useState(false);
 
   const today = todayISO();
 
-  // Persist
-  useEffect(() => localStorage.setItem(KEY.ENTRIES, JSON.stringify(entries)), [entries]);
-  useEffect(() => localStorage.setItem(KEY.SETTINGS, JSON.stringify(settings)), [settings]);
+  // Load user-scoped data when currentName changes
+  useEffect(() => {
+    if (!currentName) return;
+    try {
+      const e = JSON.parse(localStorage.getItem(LSK.ENTRIES(currentName)) || "[]");
+      const s = JSON.parse(localStorage.getItem(LSK.SETTINGS(currentName)) || "null") || { savingsRatio: 0 };
+      setEntries(Array.isArray(e) ? e : []);
+      setSettings(typeof s === "object" && s ? s : { savingsRatio: 0 });
+    } catch {
+      setEntries([]);
+      setSettings({ savingsRatio: 0 });
+    }
+  }, [currentName]);
+
+  // Persist user-scoped data
+  useEffect(() => {
+    if (!currentName) return;
+    localStorage.setItem(LSK.ENTRIES(currentName), JSON.stringify(entries));
+  }, [entries, currentName]);
+  useEffect(() => {
+    if (!currentName) return;
+    localStorage.setItem(LSK.SETTINGS(currentName), JSON.stringify(settings));
+  }, [settings, currentName]);
 
   // ----- Derived: weeks map -----
   const weeksMap = useMemo(() => {
@@ -198,7 +215,7 @@ export default function App() {
   const todayEntry = entries.find((e) => e.date === today);
   const onSaveToday = () => {
     const gList = todayGratitude
-      .split(/[\\n,]/)
+      .split(/[\n,]/)
       .map((s) => s.trim())
       .filter(Boolean);
     if (!todayImprove || todayImprove.trim().length < 3) {
@@ -229,24 +246,82 @@ export default function App() {
     if (!confirm("確定要刪除此日的紀錄？")) return;
     setEntries((prev) => prev.filter((e) => e.date !== date));
   };
-  const clearAll = () => {
-    if (!confirm("確定清除所有本地資料？此動作無法復原。")) return;
+  const clearAllForUser = () => {
+    if (!currentName) return;
+    if (!confirm(`確定清除使用者「${currentName}」的本機資料？此動作無法復原。`)) return;
+    setEntries([]);
+    setSettings({ savingsRatio: 0 });
+    localStorage.removeItem(LSK.ENTRIES(currentName));
+    localStorage.removeItem(LSK.SETTINGS(currentName));
+  };
+  const onConfirmUser = () => {
+    const nn = normalizeName(rawName);
+    if (!nn) {
+      alert("請先輸入使用者名稱");
+      return;
+    }
+    localStorage.setItem(LSK.CURRENT_NAME, nn);
+    setCurrentName(nn);
+  };
+  const onSwitchUser = () => {
+    if (!confirm("要切換使用者嗎？目前資料已自動保存。")) return;
+    localStorage.removeItem(LSK.CURRENT_NAME);
+    setCurrentName("");
+    setRawName("");
     setEntries([]);
     setSettings({ savingsRatio: 0 });
   };
 
   // ----- Render -----
+  if (!currentName) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white p-6">
+        <div className="w-full max-w-md p-6 rounded-2xl border border-gray-200 bg-white shadow-sm">
+          <h1 className="text-2xl font-bold mb-3">Habit Tracker MVP</h1>
+          <p className="text-sm text-gray-600 mb-4">請先輸入使用者名稱（之後可切換）。</p>
+          <input
+            value={rawName}
+            onChange={(e) => setRawName(e.target.value)}
+            placeholder="例如：cathy、grandma、user-01"
+            className="w-full rounded-xl border border-gray-300 p-3 mb-4 focus:outline-none focus:ring-2 focus:ring-gray-300"
+          />
+          <button
+            onClick={onConfirmUser}
+            className="w-full px-4 py-2 rounded-xl bg-black text-white hover:opacity-90"
+          >
+            開始使用
+          </button>
+          <p className="text-xs text-gray-500 mt-3">
+            小提醒：名稱將用來分開儲存各自的資料（本機瀏覽器）。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-white text-gray-900 p-6 md:p-10 max-w-5xl mx-auto">
       <header className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl md:text-3xl font-bold">Habit Tracker MVP</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl md:text-3xl font-bold">Habit Tracker MVP</h1>
+          <span className="text-xs px-2 py-1 rounded-full border bg-gray-50 text-gray-700">
+            使用者：{currentName}
+          </span>
+        </div>
         <div className="flex items-center gap-3 text-sm text-gray-500">
           <button
-            onClick={clearAll}
+            onClick={clearAllForUser}
             className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 text-gray-700"
-            title="清除所有本地資料"
+            title="清除當前使用者的本地資料"
           >
             清除資料
+          </button>
+          <button
+            onClick={onSwitchUser}
+            className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 text-gray-700"
+            title="切換使用者"
+          >
+            切換使用者
           </button>
           <span>{today}</span>
         </div>
@@ -490,7 +565,7 @@ export default function App() {
       </section>
 
       <footer className="text-xs text-gray-400 mt-10">
-        MVP：本地儲存、估算邏輯僅供驗證規則與體驗。之後可接後端（Supabase）與排程結算。
+        使用者名稱會用於本機分帳。之後若接後端（Firestore / Supabase），可用該名稱對應文件路徑或帳號識別。
       </footer>
     </div>
   );
