@@ -1,4 +1,4 @@
-// ===== src/App.jsx — switch to Firestore storage step-by-step =====
+// ===== src/App.jsx — 同一個輸入框，加入「今日 / 昨日」切換 =====
 import React, { useEffect, useMemo, useState } from "react";
 import {
   normalizeName,
@@ -7,9 +7,16 @@ import {
   healthCheck
 } from "./firebase";
 
-// ----- Date & Period Helpers -----
+// ----- Date Helpers -----
 function todayISO() {
   const d = new Date();
+  const tzOffset = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - tzOffset * 60000);
+  return local.toISOString().slice(0, 10);
+}
+function yesterdayISO() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
   const tzOffset = d.getTimezoneOffset();
   const local = new Date(d.getTime() - tzOffset * 60000);
   return local.toISOString().slice(0, 10);
@@ -42,7 +49,7 @@ function parseISO(dateStr) {
   return new Date(y, m - 1, d);
 }
 
-// ----- Lightweight AI Suggestion Rules -----
+// ----- Lightweight AI Suggestion -----
 function aiSuggest(text) {
   const t = (text || "").toLowerCase();
   const rules = [
@@ -67,25 +74,42 @@ const Stat = ({ label, value, sub }) => (
 );
 
 export default function App() {
-  // ----- Username gate -----
+  // 使用者
   const [currentName, setCurrentName] = useState(() => {
     try { return localStorage.getItem("mvp.currentName.v2") || ""; } catch { return ""; }
   });
   const [rawName, setRawName] = useState("");
   useEffect(() => setRawName(currentName || ""), [currentName]);
 
-  // ----- Cloud states -----
+  // 雲端資料
   const [entries, setEntries] = useState([]);
   const [settings, setSettingsLocal] = useState({ savingsRatio: 0 });
-  const [todayImprove, setTodayImprove] = useState("");
-  const [todayGratitude, setTodayGratitude] = useState("");
-  const [todayBookkeep, setTodayBookkeep] = useState(false);
-  const [cloudOK, setCloudOK] = useState(null); // null=unknown, true/false
+  const [cloudOK, setCloudOK] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // 單一輸入框的狀態（由 targetDate 決定寫入哪一天）
   const today = todayISO();
+  const yesterday = yesterdayISO();
+  const [targetDate, setTargetDate] = useState(today);
+  const [improve, setImprove] = useState("");
+  const [gratitude, setGratitude] = useState("");
+  const [bookkeep, setBookkeep] = useState(false);
 
-  // ---- Step A: Health check + initial load ----
+  // 依 targetDate 帶出該日已存內容
+  useEffect(() => {
+    const exist = entries.find((e) => e.date === targetDate);
+    if (exist) {
+      setImprove(exist.improve || "");
+      setGratitude((exist.gratitude || []).join("\n"));
+      setBookkeep(!!exist.bookkeeping);
+    } else {
+      setImprove("");
+      setGratitude("");
+      setBookkeep(false);
+    }
+  }, [targetDate, entries]);
+
+  // 初次載入
   async function loadFromCloud(username) {
     setLoading(true);
     try {
@@ -105,13 +129,9 @@ export default function App() {
       setLoading(false);
     }
   }
+  useEffect(() => { if (currentName) loadFromCloud(currentName); }, [currentName]);
 
-  useEffect(() => {
-    if (!currentName) return;
-    loadFromCloud(currentName);
-  }, [currentName]);
-
-  // ----- Derived maps / stats -----
+  // 統計
   const weeksMap = useMemo(() => {
     const map = new Map();
     entries.forEach((e) => {
@@ -121,7 +141,6 @@ export default function App() {
     });
     return map;
   }, [entries]);
-
   const thisWeekKey = weekKey(new Date());
   const thisWeekEntries = weeksMap.get(thisWeekKey) || [];
   const thisWeekMet = thisWeekEntries.length >= 3;
@@ -135,7 +154,6 @@ export default function App() {
     });
     return map;
   }, [entries]);
-
   const thisMonthKey = monthKey(new Date());
   const thisMonthEntries = monthsMap.get(thisMonthKey) || [];
 
@@ -156,28 +174,9 @@ export default function App() {
     }
     return weeks;
   }, [weeksMap]);
-
   const monthAllWeeksMet = thisMonthWeeksStatus.length > 0 && thisMonthWeeksStatus.every((w) => w.met);
+
   const weeklyRewardBase = 10;
-  const nextMonthWeeklyReward = monthAllWeeksMet ? 12 : 10;
-
-  const interpersonalUnlock = useMemo(() => {
-    const now = new Date();
-    const start = new Date(now);
-    start.setDate(now.getDate() - 7 * 7);
-    const buckets = new Map();
-    entries.forEach((e) => {
-      const d = parseISO(e.date);
-      if (d >= start && d <= now) {
-        const wk = weekKey(d);
-        buckets.set(wk, (buckets.get(wk) || 0) + 1);
-      }
-    });
-    const stats = Array.from(buckets.values());
-    const metCount = stats.filter((n) => n >= 3).length;
-    return { metCount, totalWeeks: Math.max(stats.length, 8), unlocked: metCount >= 6 };
-  }, [entries]);
-
   const pointsDerived = useMemo(() => {
     const rewards = new Map();
     const weeks = new Map();
@@ -188,11 +187,9 @@ export default function App() {
     weeks.forEach((count) => {
       if (count >= 3) rewards.set("x", (rewards.get("x") || 0) + weeklyRewardBase);
     });
-    let total = 0;
-    rewards.forEach((v) => (total += v));
+    let total = 0; rewards.forEach((v) => (total += v));
     return { total };
   }, [entries]);
-
   const savingsRatio = settings.savingsRatio;
   const bookkeepingDaysThisMonth = thisMonthEntries.filter((e) => e.bookkeeping).length;
   const bookkeepingBoost = bookkeepingDaysThisMonth >= 12;
@@ -202,39 +199,32 @@ export default function App() {
     0.0;
   const projectedMonthEnd = Math.round(pointsDerived.total * (1 + monthlyGainPct));
 
-  // ----- Handlers -----
-  const todayEntry = entries.find((e) => e.date === today);
-
-  const onSaveToday = async () => {
-    const gList = todayGratitude.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-    if (!todayImprove || todayImprove.trim().length < 3) {
-      alert("請寫下至少 1 條具體的改進/做錯事項（≥3 字）。"); return;
-    }
+  // 事件處理
+  const onSave = async () => {
+    const gList = (gratitude || "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+    if (!improve || improve.trim().length < 3) { alert("請寫下至少 1 條具體的改進/做錯事項（≥3 字）。"); return; }
     if (gList.length < 1) { alert("請至少寫下一件感恩的事。"); return; }
-
-    const payload = { date: today, improve: todayImprove.trim(), gratitude: gList, bookkeeping: todayBookkeep };
+    const payload = { date: targetDate, improve: improve.trim(), gratitude: gList, bookkeeping: !!bookkeep };
     try {
       await saveEntryCloud(currentName, payload);
-      // 本地立即反映
       setEntries((prev) => {
-        const exists = prev.some((e) => e.date === today);
-        if (exists) return prev.map((e) => (e.date === today ? payload : e));
+        const exists = prev.some((e) => e.date === targetDate);
+        if (exists) return prev.map((e) => (e.date === targetDate ? payload : e));
         return [payload, ...prev];
       });
-      setTimeout(() => alert(`AI 建議：${aiSuggest(todayImprove)}`), 30);
-      setTodayImprove("");
-      setTodayBookkeep(false);
+      setTimeout(() => alert(`AI 建議：${aiSuggest(improve)}`), 30);
     } catch (e) {
       console.error(e);
       alert("雲端寫入失敗，請檢查 Firebase 規則或設定。");
     }
   };
 
-  const removeEntry = async (date) => {
-    if (!confirm("確定要刪除此日的紀錄？")) return;
+  const removeEntry = async () => {
+    if (!confirm(`確定要刪除「${targetDate}」的紀錄？`)) return;
     try {
-      await deleteEntryCloud(currentName, date);
-      setEntries((prev) => prev.filter((e) => e.date !== date));
+      await deleteEntryCloud(currentName, targetDate);
+      setEntries((prev) => prev.filter((e) => e.date !== targetDate));
+      setImprove(""); setGratitude(""); setBookkeep(false);
     } catch (e) {
       console.error(e);
       alert("刪除失敗，請檢查 Firebase 設定。");
@@ -256,7 +246,6 @@ export default function App() {
     setSettingsLocal({ savingsRatio: 0 });
     setCloudOK(null);
   };
-
   const onChangeSettings = async (nextRatio) => {
     try {
       const next = { ...settings, savingsRatio: Number(nextRatio) };
@@ -268,12 +257,12 @@ export default function App() {
     }
   };
 
-  // ----- Render -----
+  // ---- Render ----
   if (!currentName) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-white p-6">
         <div className="w-full max-w-md p-6 rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <h1 className="text-2xl font-bold mb-3">Habit Tracker MVP</h1>
+          <h1 className="text-2xl font-bold mb-3">Habit Tracker   v1</h1>
           <p className="text-sm text-gray-600 mb-4">請先輸入使用者名稱（之後可切換）。</p>
           <input
             value={rawName}
@@ -287,19 +276,22 @@ export default function App() {
           >
             開始使用
           </button>
-          <p className="text-xs text-gray-500 mt-3">
-            小提醒：名稱會對應雲端路徑（users/&lt;name&gt;）。
-          </p>
+          <p className="text-xs text-gray-500 mt-3">小提醒：名稱會對應雲端路徑（users/&lt;name&gt;）。</p>
         </div>
       </div>
     );
   }
 
+  const hasEntryForTarget = entries.some((e) => e.date === targetDate);
+
   return (
     <div className="min-h-screen bg-white text-gray-900 p-6 md:p-10 max-w-5xl mx-auto">
       <header className="mb-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-2xl md:text-3xl font-bold">Habit Tracker MVP</h1>
+          <h1 className="text-2xl md:text-3xl font-bold flex items-baseline gap-2">
+            Habit Tracker
+            {/* <span className="text-sm font-normal text-gray-500">v1.0</span> */}
+          </h1>
           <span className="text-xs px-2 py-1 rounded-full border bg-gray-50 text-gray-700">
             使用者：{currentName}
           </span>
@@ -307,13 +299,13 @@ export default function App() {
           {cloudOK === false && <span className="text-xs text-red-600">（雲端連線失敗）</span>}
         </div>
         <div className="flex items-center gap-3 text-sm text-gray-500">
-          <button
+          {/* <button
             onClick={() => loadFromCloud(currentName)}
             className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 text-gray-700"
             title="重新從雲端讀取"
           >
             重新整理
-          </button>
+          </button> */}
           <button
             onClick={onSwitchUser}
             className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 text-gray-700"
@@ -325,9 +317,7 @@ export default function App() {
         </div>
       </header>
 
-      {loading && (
-        <div className="mb-4 text-sm text-gray-600">讀取中…</div>
-      )}
+      {loading && <div className="mb-4 text-sm text-gray-600">讀取中…</div>}
 
       {/* Top stats */}
       <section className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
@@ -347,39 +337,62 @@ export default function App() {
           sub={`本週${thisWeekMet ? "+10" : "+0"}（估）`}
         />
         <Stat
-          label="下月週獎勵"
-          value={`${nextMonthWeeklyReward} 點`}
-          sub={monthAllWeeksMet ? "本月每週都達標 ✔" : "條件：本月每週 ≥3 天"}
+          label="月底點數（推估）"
+          value={`${projectedMonthEnd} 點`}
+          sub={`月增益率：約 ${Math.round(monthlyGainPct * 100)}%`}
         />
       </section>
 
-      {/* Entry + Wallet */}
+      {/* 單一輸入區：透過今日/昨日切換 targetDate */}
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Entry card */}
         <div className="lg:col-span-2 p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <h2 className="text-xl font-semibold mb-4">今日輸入（自我）</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">
+              今日輸入
+              <span className="ml-2 text-sm text-gray-500">
+                目標日期：{targetDate}
+              </span>
+            </h2>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setTargetDate(today)}
+                className={`px-3 py-1.5 rounded-lg border ${targetDate === today ? "bg-black text-white" : "bg-white text-gray-700 hover:bg-gray-50"}`}
+                title="寫入今天"
+              >
+                今日
+              </button>
+              <button
+                onClick={() => setTargetDate(yesterday)}
+                className={`px-3 py-1.5 rounded-lg border ${targetDate === yesterday ? "bg-black text-white" : "bg-white text-gray-700 hover:bg-gray-50"}`}
+                title="寫入昨天"
+              >
+                昨日
+              </button>
+            </div>
+          </div>
+
           <div className="space-y-3">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">做錯/改進（只填 1 件）</label>
+              <label className="block text-sm text-gray-600 mb-1">改進/做錯（只填 1 件）</label>
               <textarea
-                value={todayImprove}
-                onChange={(e) => setTodayImprove(e.target.value)}
+                value={improve}
+                onChange={(e) => setImprove(e.target.value)}
                 rows={3}
-                placeholder="例：拖延回覆信件 → 明天 10:00 先回 3 封"
+                placeholder={targetDate === today ? "例：拖延回覆信件 → 明天 10:00 先回 3 封" : "例：昨天分心滑手機 → 今天 21:30 收手機"}
                 className="w-full rounded-xl border border-gray-300 p-3 focus:outline-none focus:ring-2 focus:ring-gray-300"
               />
-              {todayImprove && (
-                <p className="text-xs text-gray-500 mt-1">AI 建議（預覽）：{aiSuggest(todayImprove)}</p>
+              {improve && (
+                <p className="text-xs text-gray-500 mt-1">AI 建議（預覽）：{aiSuggest(improve)}</p>
               )}
             </div>
 
             <div>
               <label className="block text-sm text-gray-600 mb-1">感恩（至少 1 件，逗號或換行分隔）</label>
               <textarea
-                value={todayGratitude}
-                onChange={(e) => setTodayGratitude(e.target.value)}
+                value={gratitude}
+                onChange={(e) => setGratitude(e.target.value)}
                 rows={2}
-                placeholder="例：家人支持、同事幫忙 code review、今天天氣很好"
+                placeholder="例：家人支持、同事幫忙、今天天氣很好"
                 className="w-full rounded-xl border border-gray-300 p-3 focus:outline-none focus:ring-2 focus:ring-gray-300"
               />
             </div>
@@ -389,45 +402,40 @@ export default function App() {
                 id="bk"
                 type="checkbox"
                 className="h-4 w-4"
-                checked={todayBookkeep}
-                onChange={(e) => setTodayBookkeep(e.target.checked)}
+                checked={bookkeep}
+                onChange={(e) => setBookkeep(e.target.checked)}
               />
               <label htmlFor="bk" className="text-sm text-gray-700">
-                今天有記帳
+                {targetDate === today ? "今天" : "昨天"}有記帳
               </label>
             </div>
 
             <div className="flex gap-3">
-              <button onClick={onSaveToday} className="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90">
+              <button
+                onClick={onSave}
+                className="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90"
+              >
                 儲存
               </button>
-              {todayEntry && (
+              {hasEntryForTarget && (
                 <button
-                  onClick={() => removeEntry(today)}
+                  onClick={removeEntry}
                   className="px-4 py-2 rounded-xl border border-gray-300 hover:bg-gray-50"
                 >
-                  刪除今日
+                  刪除此日
                 </button>
               )}
             </div>
-
-            {todayEntry && (
-              <div className="text-sm text-gray-500">
-                今天已紀錄：{todayEntry.improve.slice(0, 50)}
-                {todayEntry.improve.length > 50 ? "…" : ""}
-              </div>
-            )}
           </div>
         </div>
 
-        {/* Wallet card */}
+        {/* 點數錢包 */}
         <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <h2 className="text-xl font-semibold mb-4">點數錢包（MVP）</h2>
+          <h2 className="text-xl font-semibold mb-4">點數錢包</h2>
           <div className="space-y-3">
             <div className="text-sm text-gray-600">
               可用點數（估算）：<span className="font-semibold text-gray-900">{pointsDerived.total}</span>
             </div>
-
             <div>
               <label className="block text-sm text-gray-600 mb-1">儲蓄比例</label>
               <select
@@ -440,7 +448,6 @@ export default function App() {
                 <option value={0.5}>50%</option>
               </select>
             </div>
-
             <div className="text-sm text-gray-600">
               月增益率：<b>{Math.round(monthlyGainPct * 100)}%</b>{" "}
               {savingsRatio === 0.25 && (
@@ -449,87 +456,17 @@ export default function App() {
                 </span>
               )}
             </div>
-
-            <div className="text-sm text-gray-600">
-              本月記帳天數：<b>{bookkeepingDaysThisMonth}</b>
-            </div>
-
-            <div className="p-3 rounded-xl bg-gray-50 border text-sm">
-              月底點數（推估）：<b>{projectedMonthEnd}</b>
-            </div>
+            <div className="text-sm text-gray-600">本月記帳天數：<b>{bookkeepingDaysThisMonth}</b></div>
+            <div className="p-3 rounded-xl bg-gray-50 border text-sm">月底點數（推估）：<b>{projectedMonthEnd}</b></div>
           </div>
         </div>
       </section>
 
-      {/* Weekly / Monthly / Interpersonal */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
-        {/* Weekly progress */}
-        <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <h3 className="font-semibold mb-3">本週進度</h3>
-          <div className="text-sm text-gray-700 mb-2">{thisWeekEntries.length} / 7 天</div>
-          <div className="h-2 rounded bg-gray-100 mb-3">
-            <div
-              className="h-2 rounded bg-black"
-              style={{ width: `${(thisWeekEntries.length / 7) * 100}%` }}
-            />
-          </div>
-          <div className="text-sm">
-            {thisWeekMet ? "已達標，本週 +10 點" : "尚未達標（需 ≥3 天）"}
-          </div>
-        </div>
-
-        {/* Monthly weeks status */}
-        <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <h3 className="font-semibold mb-3">本月週達標概況</h3>
-          <ul className="space-y-2 text-sm">
-            {thisMonthWeeksStatus.length === 0 && (
-              <li className="text-gray-500">本月尚無完整週紀錄</li>
-            )}
-            {thisMonthWeeksStatus.map((w) => (
-              <li key={w.week} className="flex items-center justify-between">
-                <span>{w.week}（週一）</span>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-xs ${
-                    w.met ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {w.met ? "達標" : "未達標"}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <div className="mt-3 text-sm text-gray-700">
-            {monthAllWeeksMet
-              ? "✅ 本月每週都達標：下月週獎勵自動升為 12 點"
-              : "條件：本月每週都達標即可升級下月週獎勵"}
-          </div>
-        </div>
-
-        {/* Interpersonal unlock */}
-        <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <h3 className="font-semibold mb-3">人際模組</h3>
-          <div className="text-sm text-gray-700">
-            近 8 週中，≥3 天達標的週數：<b>{interpersonalUnlock.metCount}</b> 週
-          </div>
-          <div className="h-2 rounded bg-gray-100 my-3">
-            <div
-              className="h-2 rounded bg-black"
-              style={{ width: `${Math.min(100, (interpersonalUnlock.metCount / 6) * 100)}%` }}
-            />
-          </div>
-          {interpersonalUnlock.unlocked ? (
-            <div className="text-sm">✅ 已解鎖「人際」紀錄功能（MVP 未實作頁面）。</div>
-          ) : (
-            <div className="text-sm text-gray-600">未解鎖（條件：近 8 週中 ≥6 週達標）。</div>
-          )}
-        </div>
-      </section>
-
-      {/* History list */}
+      {/* 歷史紀錄 */}
       <section className="mt-8 p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
         <h3 className="font-semibold mb-4">歷史紀錄</h3>
         {entries.length === 0 ? (
-          <div className="text-sm text-gray-500">尚無紀錄，先在上方新增今日內容吧！</div>
+          <div className="text-sm text-gray-500">尚無紀錄，先在上方新增內容吧！</div>
         ) : (
           <div className="space-y-3">
             {entries
@@ -541,18 +478,28 @@ export default function App() {
                     <div className="font-medium">{e.date}</div>
                     <button
                       className="text-xs text-gray-500 hover:text-red-600"
-                      onClick={() => removeEntry(e.date)}
+                      onClick={async () => {
+                        if (!confirm(`要刪除 ${e.date} 的紀錄嗎？`)) return;
+                        try {
+                          await deleteEntryCloud(currentName, e.date);
+                          setEntries((prev) => prev.filter((x) => x.date !== e.date));
+                          if (targetDate === e.date) {
+                            setImprove(""); setGratitude(""); setBookkeep(false);
+                          }
+                        } catch (err) {
+                          console.error(err);
+                          alert("刪除失敗，請檢查 Firebase 設定。");
+                        }
+                      }}
                     >
                       刪除
                     </button>
                   </div>
                   <div className="text-sm mt-2">
-                    <span className="text-gray-500">改進：</span>
-                    {e.improve}
+                    <span className="text-gray-500">改進：</span>{e.improve}
                   </div>
                   <div className="text-sm mt-1">
-                    <span className="text-gray-500">感恩：</span>
-                    {e.gratitude.join("、 ")}
+                    <span className="text-gray-500">感恩：</span>{(e.gratitude || []).join("、 ")}
                   </div>
                   <div className="text-xs text-gray-500 mt-1">
                     {e.bookkeeping ? "📒 當日有記帳" : ""}
@@ -563,9 +510,13 @@ export default function App() {
         )}
       </section>
 
-      <footer className="text-xs text-gray-400 mt-10">
-        目前資料已改為儲存在 Firestore（以使用者名稱分隔）。建議接下來啟用匿名登入並收緊安全規則。
+      <footer className="text-xs text-gray-400 mt-10 flex justify-between items-end">
+        <div>
+          目前資料儲存在 Firestore（以使用者名稱分隔）。建議啟用匿名登入並留意安全規則。
+        </div>
+        <div className="text-gray-400 font-normal">version 1.0</div>
       </footer>
     </div>
   );
 }
+
