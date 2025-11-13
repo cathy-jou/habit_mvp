@@ -1,4 +1,4 @@
-// ===== src/App.jsx — 支援自訂『習慣目標』（例如：準時上班）與保留歷史紀錄的習慣標籤
+// ===== src/App.jsx — 修正版本
 import React, { useEffect, useMemo, useState } from "react";
 import {
   normalizeName,
@@ -6,6 +6,11 @@ import {
   listEntries, saveEntry as saveEntryCloud, deleteEntry as deleteEntryCloud,
   healthCheck
 } from "./firebase";
+
+// ----- Simple ID Generator (Placeholder for UUID) -----
+function generateId() {
+  return Math.random().toString(36).substring(2, 9);
+}
 
 // ----- Date Helpers -----
 function todayISO() {
@@ -90,35 +95,29 @@ export default function App() {
   const [cloudOK, setCloudOK] = useState(null);
   const [loading, setLoading] = useState(false);
   
-  // 新增：歷史紀錄分頁狀態（從第 0 筆開始）
+  // 歷史紀錄分頁狀態
   const [historyOffset, setHistoryOffset] = useState(0);
 
-  // 新：可客製化的習慣文字
-  // settings 會儲存 habitLabel（字串），如果沒有則預設為 '記帳'
-  const [habitLabel, setHabitLabel] = useState("記帳");
-  const [habitInput, setHabitInput] = useState(""); // 暫存輸入框用
+  // 新：可客製化的習慣清單
+  const [customHabits, setCustomHabits] = useState([]); // [{id: '...', label: '...'}, ...]
+  const [newHabitInput, setNewHabitInput] = useState(""); // 暫存新增習慣的輸入框用
+  
+  // 新：當前日期下，每個習慣的完成狀態 {habitId: boolean, ...}
+  const [dailyHabitStatus, setDailyHabitStatus] = useState({}); 
 
-  // 單一輸入框的狀態（由 targetDate 決定寫入哪一天）
+  // 單一輸入框的狀態
   const today = todayISO();
   const yesterday = yesterdayISO();
   const [targetDate, setTargetDate] = useState(today);
   const [improve, setImprove] = useState("");
   const [gratitude, setGratitude] = useState("");
-  const [bookkeep, setBookkeep] = useState(false);
 
-  // 依 targetDate 帶出該日已存內容
-  useEffect(() => {
-    const exist = entries.find((e) => e.date === targetDate);
-    if (exist) {
-      setImprove(exist.improve || "");
-      setGratitude((exist.gratitude || []).join("\n"));
-      setBookkeep(!!exist.bookkeeping);
-    } else {
-      setImprove("");
-      setGratitude("");
-      setBookkeep(false);
-    }
-  }, [targetDate, entries]);
+  // Helper: 根據習慣 ID 取得標籤
+  const getHabitLabelById = useMemo(() => {
+    const map = new Map();
+    customHabits.forEach(h => map.set(h.id, h.label));
+    return (id) => map.get(id) || `[未知習慣: ${id}]`;
+  }, [customHabits]);
 
   // 初次載入
   async function loadFromCloud(username) {
@@ -126,7 +125,6 @@ export default function App() {
     try {
       const h = await healthCheck(username);
       setCloudOK(!!h.ok);
-      // 載入足夠的歷史資料供統計用 (例如 365 筆)
       const e = await listEntries(username, { limitRows: 365, order: "desc" });
       const s = await getSettings(username);
       setEntries(Array.isArray(e) ? e : []);
@@ -143,16 +141,48 @@ export default function App() {
   }
   useEffect(() => { if (currentName) loadFromCloud(currentName); }, [currentName]);
 
-  // 當 settings 從雲端載入時，取出 habitLabel
+  // 1. 當 settings 從雲端載入時，取出 habits
   useEffect(() => {
     if (settings && typeof settings === 'object') {
-      const label = settings.habitLabel || "記帳";
-      setHabitLabel(label);
-      setHabitInput(label);
+      const initialHabits = Array.isArray(settings.habits) && settings.habits.length > 0
+        ? settings.habits
+        // 遷移/首次使用者：如果 settings.habitLabel 存在，則建立一個預設習慣
+        : settings.habitLabel 
+            ? [{ id: 'default', label: settings.habitLabel }]
+            : [{ id: 'default', label: "記帳" }];
+      
+      setCustomHabits(initialHabits);
     }
   }, [settings]);
 
-  // 更新 settings 並儲存到雲端（可用於儲存 habitLabel）
+  // 2. 依 targetDate 帶出該日已存內容
+  useEffect(() => {
+    const exist = entries.find((e) => e.date === targetDate);
+    const newStatus = {};
+    
+    if (exist) {
+      setImprove(exist.improve || "");
+      setGratitude((exist.gratitude || []).join("\n"));
+
+      // NEW: 載入 habitsCompleted 狀態
+      const completedIds = Array.isArray(exist.habitsCompleted) ? exist.habitsCompleted : [];
+      completedIds.forEach(id => { newStatus[id] = true; });
+      
+      // OLD MIGRATION: 處理舊的 bookkeeping: true 格式
+      if (exist.bookkeeping && completedIds.length === 0) {
+        // 如果有舊的 bookkeeping 欄位且沒有新的 habitsCompleted，則將第一個習慣標記為完成
+        if (customHabits.length > 0) {
+            newStatus[customHabits[0].id] = true;
+        }
+      }
+    } else {
+      setImprove("");
+      setGratitude("");
+    }
+    setDailyHabitStatus(newStatus);
+  }, [targetDate, entries, customHabits]);
+
+  // 更新 settings 並儲存到雲端
   const onChangeSettings = async (nextRatio) => {
     try {
       const next = { ...settings, savingsRatio: Number(nextRatio) };
@@ -164,103 +194,124 @@ export default function App() {
     }
   };
 
-  // 新：存 habitLabel
-  const onSaveHabitLabel = async () => {
-    const trimmed = (habitInput || "").trim();
-    if (!trimmed) { alert('請輸入要追蹤的習慣名稱（例如：準時上班、喝水）'); return; }
+  // 新增習慣
+  const onAddHabit = async () => {
+    const trimmed = (newHabitInput || "").trim();
+    if (!trimmed) { alert('請輸入要追蹤的習慣名稱。'); return; }
+    
+    const newHabit = { id: generateId(), label: trimmed };
+    const nextHabits = [...customHabits, newHabit];
+    
     try {
-      const next = { ...settings, habitLabel: trimmed };
-      await setSettingsCloud(currentName, next);
-      setSettingsLocal(next);
-      setHabitLabel(trimmed);
-      alert(`已將習慣目標更新為：${trimmed}。
-注意：此變更將影響未來的紀錄。過去已儲存的紀錄會保留各自的 habitLabel（如存在），未包含該欄位的舊紀錄可以手動遷移。`);
+      const nextSettings = { ...settings, habits: nextHabits };
+      // 🚩 修正：在傳送前刪除這個欄位，因為 Firestore 不能儲存 undefined
+      if (nextSettings.habitLabel !== undefined) {
+          delete nextSettings.habitLabel;
+      }
+      // 注意：您可能還需要處理 setSettingsLocal 的狀態，確保它也清除了 habitLabel
+      // 為了確保本地狀態同步，如果您的 setSettingsCloud 函式是使用 SET 覆蓋，
+      // 則上面這個刪除是足夠的。
+      await setSettingsCloud(currentName, nextSettings);
+      setCustomHabits(nextHabits);
+      setSettingsLocal(nextSettings);
+      setNewHabitInput("");
     } catch (e) {
       console.error(e);
-      alert('儲存失敗，請稍後重試。');
+      alert('新增失敗，請稍後重試。');
     }
   };
 
-  // 新：將缺少 habitLabel 的舊紀錄遷移（把目前 habitLabel 填入舊紀錄）
-  const migrateEntriesAddHabitLabel = async () => {
-    if (!confirm(`將把所有尚未含有 habitLabel 的歷史紀錄，填入目前的習慣名稱：${habitLabel}。確定要繼續？`)) return;
+  // 刪除習慣
+  const onDeleteHabit = async (id, label) => {
+    if (!confirm(`確定要刪除習慣目標：「${label}」嗎？刪除不會影響已存的歷史紀錄。`)) return;
+    
+    const nextHabits = customHabits.filter(h => h.id !== id);
+    
     try {
-      const toMigrate = entries.filter((e) => e.bookkeeping && !e.habitLabel);
-      for (const e of toMigrate) {
-        const payload = { ...e, habitLabel };
-        // saveEntryCloud 以 date 作為 key，會覆寫該日期的 entry
-        await saveEntryCloud(currentName, payload);
-      }
-      // 重新載入或更新 local state
-      setEntries((prev) => prev.map((e) => (e.bookkeeping && !e.habitLabel ? { ...e, habitLabel } : e)));
-      alert(`完成遷移：共處理 ${toMigrate.length} 筆紀錄。`);
-    } catch (err) {
-      console.error(err);
-      alert('遷移失敗，請檢查網路或後端權限。');
+      const nextSettings = { ...settings, habits: nextHabits };
+      await setSettingsCloud(currentName, nextSettings);
+      setCustomHabits(nextHabits);
+      setSettingsLocal(nextSettings);
+      
+      // 移除當日狀態
+      setDailyHabitStatus(prev => {
+        const { [id]: _, ...rest } = prev;
+        return rest;
+      });
+    } catch (e) {
+      console.error(e);
+      alert('刪除失敗，請稍後重試。');
     }
   };
 
-  // 統計
-  const weeksMap = useMemo(() => {
-    const map = new Map();
-    entries.forEach((e) => {
-      const wk = weekKey(parseISO(e.date));
-      if (!map.has(wk)) map.set(wk, []);
-      map.get(wk).push(e);
-    });
-    return map;
-  }, [entries]);
-  const thisWeekKey = weekKey(new Date());
-  const thisWeekEntries = weeksMap.get(thisWeekKey) || [];
-  const thisWeekMet = thisWeekEntries.length >= 3;
 
-  const monthsMap = useMemo(() => {
-    const map = new Map();
-    entries.forEach((e) => {
-      const mk = monthKey(parseISO(e.date));
-      if (!map.has(mk)) map.set(mk, []);
-      map.get(mk).push(e);
-    });
-    return map;
-  }, [entries]);
-  const thisMonthKey = monthKey(new Date());
-  const thisMonthEntries = monthsMap.get(thisMonthKey) || [];
+  // =================================================================
+  // 🚩 修正：補回統計數據所需的計算邏輯 (此處為導致介面空白的錯誤點)
+  // =================================================================
+  const now = useMemo(() => new Date(), []);
+  const currentWeekKey = useMemo(() => weekKey(now), [now]);
+  const currentMonthKey = useMemo(() => monthKey(now), [now]);
+  
+  const thisMonthEntries = useMemo(() => {
+    return entries.filter((e) => monthKey(parseISO(e.date)) === currentMonthKey);
+  }, [entries, currentMonthKey]);
+  
+  const thisWeekEntries = useMemo(() => {
+    return entries.filter((e) => weekKey(parseISO(e.date)) === currentWeekKey);
+  }, [entries, currentWeekKey]);
+  
+  // 檢查一筆 Entry 是否為「記帳日」
+  const isBookkeepingDay = (e) => (e.habitsCompleted && e.habitsCompleted.length > 0) || e.bookkeeping;
 
   const thisMonthWeeksStatus = useMemo(() => {
-    const now = new Date();
-    const first = new Date(now.getFullYear(), now.getMonth(), 1);
-    const last = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-    const weeks = [];
-    let cursor = startOfWeek(first);
-    while (cursor <= last) {
-      const wk = cursor.toISOString().slice(0, 10);
-      const wEnd = endOfWeek(cursor);
-      if (wEnd <= new Date()) {
-        const arr = weeksMap.get(wk) || [];
-        weeks.push({ week: wk, days: arr.length, met: arr.length >= 3 });
-      }
-      cursor.setDate(cursor.getDate() + 7);
-    }
-    return weeks;
-  }, [weeksMap]);
-  const monthAllWeeksMet = thisMonthWeeksStatus.length > 0 && thisMonthWeeksStatus.every((w) => w.met);
+    const weeks = new Map();
+    thisMonthEntries.forEach((e) => {
+        if (isBookkeepingDay(e)) {
+            const wk = weekKey(parseISO(e.date));
+            weeks.set(wk, (weeks.get(wk) || 0) + 1);
+        }
+    });
+    return Array.from(weeks.entries()).map(([key, count]) => ({
+      key,
+      count,
+      met: count >= 3,
+    }));
+  }, [thisMonthEntries]);
+  
+  const thisWeekMet = useMemo(() => {
+    const currentWeekCount = thisWeekEntries.filter(isBookkeepingDay).length;
+    return currentWeekCount >= 3;
+  }, [thisWeekEntries]);
+
+  // 統計：定義『記帳日』= 當天有完成任一習慣
+  const bookkeepingDaysThisMonth = useMemo(() => {
+    // 現在 thisMonthEntries 已定義
+    return thisMonthEntries.filter(isBookkeepingDay).length; 
+  }, [thisMonthEntries]);
+  // =================================================================
+
 
   const weeklyRewardBase = 10;
   const pointsDerived = useMemo(() => {
     const rewards = new Map();
     const weeks = new Map();
+    
     entries.forEach((e) => {
-      const wk = weekKey(parseISO(e.date));
-      weeks.set(wk, (weeks.get(wk) || 0) + 1);
+      // 檢查是否為『記帳日』 (完成任一習慣或舊的 bookkeeping: true)
+      if (isBookkeepingDay(e)) {
+        const wk = weekKey(parseISO(e.date));
+        weeks.set(wk, (weeks.get(wk) || 0) + 1);
+      }
     });
+    
     weeks.forEach((count) => {
       if (count >= 3) rewards.set("x", (rewards.get("x") || 0) + weeklyRewardBase);
     });
     let total = 0; rewards.forEach((v) => (total += v));
     return { total };
   }, [entries]);
+
   const savingsRatio = settings.savingsRatio;
-  const bookkeepingDaysThisMonth = thisMonthEntries.filter((e) => e.bookkeeping).length;
   const bookkeepingBoost = bookkeepingDaysThisMonth >= 12;
   const monthlyGainPct =
     savingsRatio === 0.5 ? 0.03 :
@@ -268,22 +319,30 @@ export default function App() {
     0.0;
   const projectedMonthEnd = Math.round(pointsDerived.total * (1 + monthlyGainPct));
 
+
   // 事件處理
   const onSave = async () => {
     const gList = (gratitude || "").split(/[\\n,]/).map((s) => s.trim()).filter(Boolean);
     if (!improve || improve.trim().length < 3) { alert("請寫下至少 1 條具體的改進/做錯事項（≥3 字）。"); return; }
     if (gList.length < 1) { alert("請至少寫下一件感恩的事。"); return; }
-    // 新：在每筆 entry 中保存當時使用者的 habitLabel
-    const payload = { date: targetDate, improve: improve.trim(), gratitude: gList, bookkeeping: !!bookkeep, habitLabel };
+    
+    // NEW: 取得所有已完成的習慣 ID
+    const completedHabitIds = Object.keys(dailyHabitStatus).filter(id => dailyHabitStatus[id]);
+
+    const payload = { 
+      date: targetDate, 
+      improve: improve.trim(), 
+      gratitude: gList, 
+      habitsCompleted: completedHabitIds,
+      // 保持舊的 habitLabel 欄位以供舊紀錄顯示相容，但新紀錄不傳入或設為 undefined
+    };
     try {
       await saveEntryCloud(currentName, payload);
       setEntries((prev) => {
         const exists = prev.some((e) => e.date === targetDate);
         if (exists) return prev.map((e) => (e.date === targetDate ? payload : e));
-        // 確保新紀錄加在最前面 (listEntries 是 desc 排序)
         return [payload, ...prev.filter((e) => e.date !== targetDate)];
       });
-      // 確保儲存新紀錄後，頁碼回到第一頁
       setHistoryOffset(0); 
       setTimeout(() => alert(`AI 建議：${aiSuggest(improve)}`), 30);
     } catch (e) {
@@ -297,8 +356,7 @@ export default function App() {
     try {
       await deleteEntryCloud(currentName, targetDate);
       setEntries((prev) => prev.filter((e) => e.date !== targetDate));
-      setImprove(""); setGratitude(""); setBookkeep(false);
-      // 重新檢查 historyOffset，防止刪除後頁面跑到空白頁
+      setImprove(""); setGratitude(""); setDailyHabitStatus({});
       if (historyOffset >= entries.length - 1) {
         setHistoryOffset(Math.max(0, historyOffset - HISTORY_LIMIT));
       }
@@ -329,14 +387,12 @@ export default function App() {
   const isLastPage = historyOffset + HISTORY_LIMIT >= entries.length;
   
   const onNextPage = () => {
-    // 往前翻（查看更舊的紀錄）
     if (!isLastPage) {
       setHistoryOffset(historyOffset + HISTORY_LIMIT);
     }
   };
   
   const onPrevPage = () => {
-    // 往後翻（查看更新的紀錄）
     if (!isFirstPage) {
       setHistoryOffset(Math.max(0, historyOffset - HISTORY_LIMIT));
     }
@@ -481,17 +537,32 @@ export default function App() {
               />
             </div>
 
-            <div className="flex items-center gap-3">
-              <input
-                id="bk"
-                type="checkbox"
-                className="h-4 w-4"
-                checked={bookkeep}
-                onChange={(e) => setBookkeep(e.target.checked)}
-              />
-              <label htmlFor="bk" className="text-sm text-gray-700">
-                {targetDate === today ? `今天有${habitLabel}` : `昨天有${habitLabel}`}
+            {/* NEW: Multiple Habit Checkboxes */}
+            <div className="space-y-2 pt-2 border-t">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                {targetDate === today ? `今天完成的習慣` : `昨天完成的習慣`}
               </label>
+              
+              {customHabits.length > 0 ? (
+                customHabits.map((habit) => (
+                  <div key={habit.id} className="flex items-center">
+                    <input
+                      id={`habit-${habit.id}`}
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
+                      checked={!!dailyHabitStatus[habit.id]}
+                      onChange={(e) => 
+                        setDailyHabitStatus(prev => ({ ...prev, [habit.id]: e.target.checked }))
+                      }
+                    />
+                    <label htmlFor={`habit-${habit.id}`} className="ml-2 text-sm text-gray-700">
+                      {habit.label}
+                    </label>
+                  </div>
+                ))
+              ) : (
+                <p className="text-xs text-red-500">請先在右側設定習慣目標。</p>
+              )}
             </div>
 
             <div className="flex gap-3">
@@ -541,41 +612,43 @@ export default function App() {
                 </span>
               )}
             </div>
-            <div className="text-sm text-gray-600">本月{habitLabel}天數：<b>{bookkeepingDaysThisMonth}</b></div>
+            {/* 更改：顯示當月有完成任一習慣的天數 */}
+            <div className="text-sm text-gray-600">本月習慣完成天數：<b>{bookkeepingDaysThisMonth}</b></div>
             <div className="p-3 rounded-xl bg-gray-50 border text-sm">月底點數（推估）：<b>{projectedMonthEnd}</b></div>
 
-            {/* 新：習慣目標設定 */}
+            {/* NEW: 習慣目標設定 - 替換為多個習慣管理 */}
             <div className="mt-4 pt-2 border-t">
-              <label className="block text-sm text-gray-600 mb-2">習慣目標（自訂）</label>
-              <div className="flex gap-2 items-center">
-                <input
-                  value={habitInput}
-                  onChange={(e) => setHabitInput(e.target.value)}
-                  placeholder="例如：準時上班、喝水、早睡"
-                  className="flex-1 rounded-xl border border-gray-300 p-2"
-                />
-                <button
-                  onClick={onSaveHabitLabel}
-                  className="px-3 py-1.5 rounded-lg border bg-black text-white"
-                >
-                  儲存
-                </button>
-              </div>
-              <div className="text-xs text-gray-500 mt-2">已設定為：<b>{habitLabel}</b></div>
-
-              {/* 遷移用按鈕（選用） */}
-              <div className="mt-3 text-xs text-gray-500">
-                {/* <div>注意：舊紀錄若未包含 habitLabel 欄位，系統無法自動還原當時的文字（原始值未儲存）。</div> */}
-                <div className="mt-2 flex gap-2">
+              <label className="block text-sm text-gray-600 mb-2 font-semibold">習慣目標清單（自訂）</label>
+              
+              {/* 習慣清單 */}
+              {customHabits.map((habit) => (
+                <div key={habit.id} className="flex items-center justify-between text-sm py-1 border-b last:border-b-0">
+                  <span className="truncate">{habit.label}</span>
                   <button
-                    onClick={migrateEntriesAddHabitLabel}
-                    className="px-3 py-1 rounded-lg border bg-white hover:bg-gray-50"
+                    onClick={() => onDeleteHabit(habit.id, habit.label)}
+                    className="text-red-500 hover:text-red-700 text-xs ml-3"
+                    title={`刪除習慣: ${habit.label}`}
                   >
-                    將缺少的舊紀錄填上目前習慣名稱
+                    刪除
                   </button>
                 </div>
-              </div>
+              ))}
 
+              {/* 新增輸入框 */}
+              <div className="flex gap-2 items-center mt-3">
+                <input
+                  value={newHabitInput}
+                  onChange={(e) => setNewHabitInput(e.target.value)}
+                  placeholder="新增習慣（例如：準時上班、喝水）"
+                  className="flex-1 rounded-xl border border-gray-300 p-2 text-sm"
+                />
+                <button
+                  onClick={onAddHabit}
+                  className="px-3 py-1.5 rounded-lg border bg-black text-white text-sm"
+                >
+                  新增
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -584,14 +657,14 @@ export default function App() {
       {/* 歷史紀錄 */}
       <section className="mt-8 p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
         
-        {/* 修改：將標題與分頁按鈕放在同一行 */}
+        {/* 標題與分頁按鈕 */}
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold">歷史紀錄</h3>
           
           {totalEntries > HISTORY_LIMIT && (
             <div className="flex items-center gap-2 text-sm text-gray-600">
               <span className="text-xs text-gray-500">
-                顯示最近 {currentStart}-{currentEnd} / 共 {totalEntries}
+                顯示 {currentStart}-{currentEnd} / 共 {totalEntries}
               </span>
               {/* 往後（更新的紀錄） */}
               <button
@@ -600,7 +673,6 @@ export default function App() {
                 className={`p-1 rounded-full border transition ${isFirstPage ? 'text-gray-400 cursor-not-allowed' : 'bg-gray-100 hover:bg-gray-200'}`}
                 title="上一頁（較新的紀錄）"
               >
-                {/* 使用簡單的箭頭 Unicode 或 SVG 圖標 */}
                 <span style={{ fontSize: '1rem' }}>&#9664;</span> 
               </button>
 
@@ -623,45 +695,63 @@ export default function App() {
           <div className="space-y-3">
             {/* 使用 visibleEntries 渲染當前頁面的 5 筆資料 */}
             {visibleEntries
-              .map((e) => (
-                <div key={e.date} className="p-3 border rounded-xl">
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium">{e.date}</div>
-                    <button
-                      className="text-xs text-gray-500 hover:text-red-600"
-                      onClick={async () => {
-                        if (!confirm(`要刪除 ${e.date} 的紀錄嗎？`)) return;
-                        try {
-                          await deleteEntryCloud(currentName, e.date);
-                          setEntries((prev) => prev.filter((x) => x.date !== e.date));
-                          if (targetDate === e.date) {
-                            setImprove(""); setGratitude(""); setBookkeep(false);
+              .map((e) => {
+                // NEW: 準備顯示已完成的習慣
+                const completedHabitsList = Array.isArray(e.habitsCompleted) ? e.habitsCompleted : [];
+                const completedHabitsDisplay = completedHabitsList
+                    .map(getHabitLabelById)
+                    .join('、 ');
+                
+                // 舊資料相容判斷
+                const hasOldBookkeeping = e.bookkeeping && completedHabitsList.length === 0;
+
+                return (
+                  <div key={e.date} className="p-3 border rounded-xl">
+                    <div className="flex items-center justify-between">
+                      <div className="font-medium">{e.date}</div>
+                      <button
+                        className="text-xs text-gray-500 hover:text-red-600"
+                        onClick={async () => {
+                          if (!confirm(`要刪除 ${e.date} 的紀錄嗎？`)) return;
+                          try {
+                            await deleteEntryCloud(currentName, e.date);
+                            setEntries((prev) => prev.filter((x) => x.date !== e.date));
+                            if (targetDate === e.date) {
+                              setImprove(""); setGratitude(""); setDailyHabitStatus({});
+                            }
+                            if (historyOffset >= entries.length - 1) {
+                              setHistoryOffset(Math.max(0, historyOffset - HISTORY_LIMIT));
+                            }
+                          } catch (err) {
+                            console.error(err);
+                            alert("刪除失敗，請檢查 Firebase 設定。");
                           }
-                          // 重新檢查 historyOffset，防止刪除後頁面跑到空白頁
-                          if (historyOffset >= entries.length - 1) {
-                            setHistoryOffset(Math.max(0, historyOffset - HISTORY_LIMIT));
-                          }
-                        } catch (err) {
-                          console.error(err);
-                          alert("刪除失敗，請檢查 Firebase 設定。");
-                        }
-                      }}
-                    >
-                      刪除
-                    </button>
+                        }}
+                      >
+                        刪除
+                      </button>
+                    </div>
+                    <div className="text-sm mt-2">
+                      <span className="text-gray-500">改進：</span>{e.improve}
+                    </div>
+                    <div className="text-sm mt-1">
+                      <span className="text-gray-500">感恩：</span>{(e.gratitude || []).join("、 ")}
+                    </div>
+                    
+                    {/* NEW: 顯示多個習慣或舊的單一習慣 */}
+                    <div className="text-xs text-gray-500 mt-1">
+                      {completedHabitsList.length > 0 ? (
+                          `✅ 完成習慣：${completedHabitsDisplay}`
+                      ) : hasOldBookkeeping ? (
+                          // Fallback for old data with old habitLabel
+                          `📒 當日有${e.habitLabel || '記帳'}`
+                      ) : (
+                          ''
+                      )}
+                    </div>
                   </div>
-                  <div className="text-sm mt-2">
-                    <span className="text-gray-500">改進：</span>{e.improve}
-                  </div>
-                  <div className="text-sm mt-1">
-                    <span className="text-gray-500">感恩：</span>{(e.gratitude || []).join("、 ")}
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    {e.bookkeeping ? `📒 當日有${e.habitLabel || habitLabel}` : ""}
-                    {/* 若 e.habitLabel 存在就顯示該歷史值，否則顯示目前的 habitLabel（fallback） */}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
           </div>
         )}
       </section>
@@ -670,7 +760,7 @@ export default function App() {
         <div>
           目前資料儲存在 Firestore（以使用者名稱分隔）。建議啟用匿名登入並留意安全規則。
         </div>
-        <div className="text-gray-400 font-normal">version 1.1 — preserve historical habit labels</div>
+        <div className="text-gray-400 font-normal">version 1.2 — Multiple Habits Tracking</div>
       </footer>
     </div>
   );
