@@ -73,6 +73,9 @@ const Stat = ({ label, value, sub }) => (
   </div>
 );
 
+// 歷史紀錄每頁顯示數量
+const HISTORY_LIMIT = 5;
+
 export default function App() {
   // 使用者
   const [currentName, setCurrentName] = useState(() => {
@@ -86,6 +89,9 @@ export default function App() {
   const [settings, setSettingsLocal] = useState({ savingsRatio: 0 });
   const [cloudOK, setCloudOK] = useState(null);
   const [loading, setLoading] = useState(false);
+  
+  // 新增：歷史紀錄分頁狀態（從第 0 筆開始）
+  const [historyOffset, setHistoryOffset] = useState(0);
 
   // 新：可客製化的習慣文字
   // settings 會儲存 habitLabel（字串），如果沒有則預設為 '記帳'
@@ -120,6 +126,7 @@ export default function App() {
     try {
       const h = await healthCheck(username);
       setCloudOK(!!h.ok);
+      // 載入足夠的歷史資料供統計用 (例如 365 筆)
       const e = await listEntries(username, { limitRows: 365, order: "desc" });
       const s = await getSettings(username);
       setEntries(Array.isArray(e) ? e : []);
@@ -273,8 +280,11 @@ export default function App() {
       setEntries((prev) => {
         const exists = prev.some((e) => e.date === targetDate);
         if (exists) return prev.map((e) => (e.date === targetDate ? payload : e));
-        return [payload, ...prev];
+        // 確保新紀錄加在最前面 (listEntries 是 desc 排序)
+        return [payload, ...prev.filter((e) => e.date !== targetDate)];
       });
+      // 確保儲存新紀錄後，頁碼回到第一頁
+      setHistoryOffset(0); 
       setTimeout(() => alert(`AI 建議：${aiSuggest(improve)}`), 30);
     } catch (e) {
       console.error(e);
@@ -288,6 +298,10 @@ export default function App() {
       await deleteEntryCloud(currentName, targetDate);
       setEntries((prev) => prev.filter((e) => e.date !== targetDate));
       setImprove(""); setGratitude(""); setBookkeep(false);
+      // 重新檢查 historyOffset，防止刪除後頁面跑到空白頁
+      if (historyOffset >= entries.length - 1) {
+        setHistoryOffset(Math.max(0, historyOffset - HISTORY_LIMIT));
+      }
     } catch (e) {
       console.error(e);
       alert("刪除失敗，請檢查 Firebase 設定。");
@@ -309,6 +323,31 @@ export default function App() {
     setSettingsLocal({ savingsRatio: 0 });
     setCloudOK(null);
   };
+
+  // 導航邏輯
+  const isFirstPage = historyOffset === 0;
+  const isLastPage = historyOffset + HISTORY_LIMIT >= entries.length;
+  
+  const onNextPage = () => {
+    // 往前翻（查看更舊的紀錄）
+    if (!isLastPage) {
+      setHistoryOffset(historyOffset + HISTORY_LIMIT);
+    }
+  };
+  
+  const onPrevPage = () => {
+    // 往後翻（查看更新的紀錄）
+    if (!isFirstPage) {
+      setHistoryOffset(Math.max(0, historyOffset - HISTORY_LIMIT));
+    }
+  };
+
+  // 渲染當前頁面的資料
+  const visibleEntries = entries.slice(historyOffset, historyOffset + HISTORY_LIMIT);
+  const totalEntries = entries.length;
+  const currentStart = totalEntries > 0 ? historyOffset + 1 : 0;
+  const currentEnd = Math.min(historyOffset + HISTORY_LIMIT, totalEntries);
+
 
   // ---- Render ----
   if (!currentName) {
@@ -544,14 +583,46 @@ export default function App() {
 
       {/* 歷史紀錄 */}
       <section className="mt-8 p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
-        <h3 className="font-semibold mb-4">歷史紀錄</h3>
-        {entries.length === 0 ? (
+        
+        {/* 修改：將標題與分頁按鈕放在同一行 */}
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold">歷史紀錄</h3>
+          
+          {totalEntries > HISTORY_LIMIT && (
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <span className="text-xs text-gray-500">
+                顯示最近 {currentStart}-{currentEnd} / 共 {totalEntries}
+              </span>
+              {/* 往後（更新的紀錄） */}
+              <button
+                onClick={onPrevPage}
+                disabled={isFirstPage}
+                className={`p-1 rounded-full border transition ${isFirstPage ? 'text-gray-400 cursor-not-allowed' : 'bg-gray-100 hover:bg-gray-200'}`}
+                title="上一頁（較新的紀錄）"
+              >
+                {/* 使用簡單的箭頭 Unicode 或 SVG 圖標 */}
+                <span style={{ fontSize: '1rem' }}>&#9664;</span> 
+              </button>
+
+              {/* 往前（更舊的紀錄） */}
+              <button
+                onClick={onNextPage}
+                disabled={isLastPage}
+                className={`p-1 rounded-full border transition ${isLastPage ? 'text-gray-400 cursor-not-allowed' : 'bg-gray-100 hover:bg-gray-200'}`}
+                title="下一頁（較舊的紀錄）"
+              >
+                <span style={{ fontSize: '1rem' }}>&#9654;</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {visibleEntries.length === 0 ? (
           <div className="text-sm text-gray-500">尚無紀錄，先在上方新增內容吧！</div>
         ) : (
           <div className="space-y-3">
-            {entries
-              .slice()
-              .sort((a, b) => (a.date < b.date ? 1 : -1))
+            {/* 使用 visibleEntries 渲染當前頁面的 5 筆資料 */}
+            {visibleEntries
               .map((e) => (
                 <div key={e.date} className="p-3 border rounded-xl">
                   <div className="flex items-center justify-between">
@@ -565,6 +636,10 @@ export default function App() {
                           setEntries((prev) => prev.filter((x) => x.date !== e.date));
                           if (targetDate === e.date) {
                             setImprove(""); setGratitude(""); setBookkeep(false);
+                          }
+                          // 重新檢查 historyOffset，防止刪除後頁面跑到空白頁
+                          if (historyOffset >= entries.length - 1) {
+                            setHistoryOffset(Math.max(0, historyOffset - HISTORY_LIMIT));
                           }
                         } catch (err) {
                           console.error(err);
