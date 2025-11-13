@@ -1,4 +1,4 @@
-// ===== src/App.jsx — 同一個輸入框，加入「今日 / 昨日」切換 =====
+// ===== src/App.jsx — 支援自訂『習慣目標』（例如：準時上班）與保留歷史紀錄的習慣標籤
 import React, { useEffect, useMemo, useState } from "react";
 import {
   normalizeName,
@@ -87,6 +87,11 @@ export default function App() {
   const [cloudOK, setCloudOK] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // 新：可客製化的習慣文字
+  // settings 會儲存 habitLabel（字串），如果沒有則預設為 '記帳'
+  const [habitLabel, setHabitLabel] = useState("記帳");
+  const [habitInput, setHabitInput] = useState(""); // 暫存輸入框用
+
   // 單一輸入框的狀態（由 targetDate 決定寫入哪一天）
   const today = todayISO();
   const yesterday = yesterdayISO();
@@ -130,6 +135,63 @@ export default function App() {
     }
   }
   useEffect(() => { if (currentName) loadFromCloud(currentName); }, [currentName]);
+
+  // 當 settings 從雲端載入時，取出 habitLabel
+  useEffect(() => {
+    if (settings && typeof settings === 'object') {
+      const label = settings.habitLabel || "記帳";
+      setHabitLabel(label);
+      setHabitInput(label);
+    }
+  }, [settings]);
+
+  // 更新 settings 並儲存到雲端（可用於儲存 habitLabel）
+  const onChangeSettings = async (nextRatio) => {
+    try {
+      const next = { ...settings, savingsRatio: Number(nextRatio) };
+      await setSettingsCloud(currentName, next);
+      setSettingsLocal(next);
+    } catch (e) {
+      console.error(e);
+      alert("設定儲存失敗。");
+    }
+  };
+
+  // 新：存 habitLabel
+  const onSaveHabitLabel = async () => {
+    const trimmed = (habitInput || "").trim();
+    if (!trimmed) { alert('請輸入要追蹤的習慣名稱（例如：準時上班、喝水）'); return; }
+    try {
+      const next = { ...settings, habitLabel: trimmed };
+      await setSettingsCloud(currentName, next);
+      setSettingsLocal(next);
+      setHabitLabel(trimmed);
+      alert(`已將習慣目標更新為：${trimmed}。
+注意：此變更將影響未來的紀錄。過去已儲存的紀錄會保留各自的 habitLabel（如存在），未包含該欄位的舊紀錄可以手動遷移。`);
+    } catch (e) {
+      console.error(e);
+      alert('儲存失敗，請稍後重試。');
+    }
+  };
+
+  // 新：將缺少 habitLabel 的舊紀錄遷移（把目前 habitLabel 填入舊紀錄）
+  const migrateEntriesAddHabitLabel = async () => {
+    if (!confirm(`將把所有尚未含有 habitLabel 的歷史紀錄，填入目前的習慣名稱：${habitLabel}。確定要繼續？`)) return;
+    try {
+      const toMigrate = entries.filter((e) => e.bookkeeping && !e.habitLabel);
+      for (const e of toMigrate) {
+        const payload = { ...e, habitLabel };
+        // saveEntryCloud 以 date 作為 key，會覆寫該日期的 entry
+        await saveEntryCloud(currentName, payload);
+      }
+      // 重新載入或更新 local state
+      setEntries((prev) => prev.map((e) => (e.bookkeeping && !e.habitLabel ? { ...e, habitLabel } : e)));
+      alert(`完成遷移：共處理 ${toMigrate.length} 筆紀錄。`);
+    } catch (err) {
+      console.error(err);
+      alert('遷移失敗，請檢查網路或後端權限。');
+    }
+  };
 
   // 統計
   const weeksMap = useMemo(() => {
@@ -201,10 +263,11 @@ export default function App() {
 
   // 事件處理
   const onSave = async () => {
-    const gList = (gratitude || "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+    const gList = (gratitude || "").split(/[\\n,]/).map((s) => s.trim()).filter(Boolean);
     if (!improve || improve.trim().length < 3) { alert("請寫下至少 1 條具體的改進/做錯事項（≥3 字）。"); return; }
     if (gList.length < 1) { alert("請至少寫下一件感恩的事。"); return; }
-    const payload = { date: targetDate, improve: improve.trim(), gratitude: gList, bookkeeping: !!bookkeep };
+    // 新：在每筆 entry 中保存當時使用者的 habitLabel
+    const payload = { date: targetDate, improve: improve.trim(), gratitude: gList, bookkeeping: !!bookkeep, habitLabel };
     try {
       await saveEntryCloud(currentName, payload);
       setEntries((prev) => {
@@ -246,16 +309,6 @@ export default function App() {
     setSettingsLocal({ savingsRatio: 0 });
     setCloudOK(null);
   };
-  const onChangeSettings = async (nextRatio) => {
-    try {
-      const next = { ...settings, savingsRatio: Number(nextRatio) };
-      await setSettingsCloud(currentName, next);
-      setSettingsLocal(next);
-    } catch (e) {
-      console.error(e);
-      alert("設定儲存失敗。");
-    }
-  };
 
   // ---- Render ----
   if (!currentName) {
@@ -290,7 +343,6 @@ export default function App() {
         <div className="flex items-center gap-3">
           <h1 className="text-2xl md:text-3xl font-bold flex items-baseline gap-2">
             Habit Tracker
-            {/* <span className="text-sm font-normal text-gray-500">v1.0</span> */}
           </h1>
           <span className="text-xs px-2 py-1 rounded-full border bg-gray-50 text-gray-700">
             使用者：{currentName}
@@ -299,13 +351,6 @@ export default function App() {
           {cloudOK === false && <span className="text-xs text-red-600">（雲端連線失敗）</span>}
         </div>
         <div className="flex items-center gap-3 text-sm text-gray-500">
-          {/* <button
-            onClick={() => loadFromCloud(currentName)}
-            className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 text-gray-700"
-            title="重新從雲端讀取"
-          >
-            重新整理
-          </button> */}
           <button
             onClick={onSwitchUser}
             className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 text-gray-700"
@@ -406,7 +451,7 @@ export default function App() {
                 onChange={(e) => setBookkeep(e.target.checked)}
               />
               <label htmlFor="bk" className="text-sm text-gray-700">
-                {targetDate === today ? "今天" : "昨天"}有記帳
+                {targetDate === today ? `今天有${habitLabel}` : `昨天有${habitLabel}`}
               </label>
             </div>
 
@@ -429,7 +474,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* 點數錢包 */}
+        {/* 點數錢包 + 習慣設定 */}
         <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm">
           <h2 className="text-xl font-semibold mb-4">點數錢包</h2>
           <div className="space-y-3">
@@ -448,6 +493,7 @@ export default function App() {
                 <option value={0.5}>50%</option>
               </select>
             </div>
+
             <div className="text-sm text-gray-600">
               月增益率：<b>{Math.round(monthlyGainPct * 100)}%</b>{" "}
               {savingsRatio === 0.25 && (
@@ -456,8 +502,42 @@ export default function App() {
                 </span>
               )}
             </div>
-            <div className="text-sm text-gray-600">本月記帳天數：<b>{bookkeepingDaysThisMonth}</b></div>
+            <div className="text-sm text-gray-600">本月{habitLabel}天數：<b>{bookkeepingDaysThisMonth}</b></div>
             <div className="p-3 rounded-xl bg-gray-50 border text-sm">月底點數（推估）：<b>{projectedMonthEnd}</b></div>
+
+            {/* 新：習慣目標設定 */}
+            <div className="mt-4 pt-2 border-t">
+              <label className="block text-sm text-gray-600 mb-2">習慣目標（自訂）</label>
+              <div className="flex gap-2 items-center">
+                <input
+                  value={habitInput}
+                  onChange={(e) => setHabitInput(e.target.value)}
+                  placeholder="例如：準時上班、喝水、早睡"
+                  className="flex-1 rounded-xl border border-gray-300 p-2"
+                />
+                <button
+                  onClick={onSaveHabitLabel}
+                  className="px-3 py-1.5 rounded-lg border bg-black text-white"
+                >
+                  儲存
+                </button>
+              </div>
+              <div className="text-xs text-gray-500 mt-2">已設定為：<b>{habitLabel}</b></div>
+
+              {/* 遷移用按鈕（選用） */}
+              <div className="mt-3 text-xs text-gray-500">
+                {/* <div>注意：舊紀錄若未包含 habitLabel 欄位，系統無法自動還原當時的文字（原始值未儲存）。</div> */}
+                <div className="mt-2 flex gap-2">
+                  <button
+                    onClick={migrateEntriesAddHabitLabel}
+                    className="px-3 py-1 rounded-lg border bg-white hover:bg-gray-50"
+                  >
+                    將缺少的舊紀錄填上目前習慣名稱
+                  </button>
+                </div>
+              </div>
+
+            </div>
           </div>
         </div>
       </section>
@@ -502,7 +582,8 @@ export default function App() {
                     <span className="text-gray-500">感恩：</span>{(e.gratitude || []).join("、 ")}
                   </div>
                   <div className="text-xs text-gray-500 mt-1">
-                    {e.bookkeeping ? "📒 當日有記帳" : ""}
+                    {e.bookkeeping ? `📒 當日有${e.habitLabel || habitLabel}` : ""}
+                    {/* 若 e.habitLabel 存在就顯示該歷史值，否則顯示目前的 habitLabel（fallback） */}
                   </div>
                 </div>
               ))}
@@ -514,9 +595,8 @@ export default function App() {
         <div>
           目前資料儲存在 Firestore（以使用者名稱分隔）。建議啟用匿名登入並留意安全規則。
         </div>
-        <div className="text-gray-400 font-normal">version 1.0</div>
+        <div className="text-gray-400 font-normal">version 1.1 — preserve historical habit labels</div>
       </footer>
     </div>
   );
 }
-
